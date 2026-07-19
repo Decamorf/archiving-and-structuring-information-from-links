@@ -60,16 +60,9 @@ _lock = threading.Lock()
 _bruteforce = {"fails": 0, "until": 0.0}
 
 
-import re as _re
-_HOME_RE = _re.compile(r"([A-Za-z]:\\Users\\|/home/|/Users/)[^\\/]+",
-                       _re.IGNORECASE)
-
-
 def log(msg: str):
-    # прячем имя пользователя в путях (журнал виден в браузере телефона)
-    safe = _HOME_RE.sub(lambda m: m.group(1) + "***", str(msg))
     with _lock:
-        _state["lines"].append(safe)
+        _state["lines"].append(str(msg))
 
 
 def worker(url: str, model: str, insta: str, savevid: bool, lang: str):

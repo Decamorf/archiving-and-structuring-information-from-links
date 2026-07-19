@@ -91,7 +91,7 @@ def now_str() -> str:
 
 _whisper_models = {}
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.1.1"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_FILES = ["archiver.py", "analyzer.py", "archiver_web.py",
              "requirements.txt", "ИНСТРУКЦИЯ.md", "ИНСТРУКЦИЯ_ТЕЛЕФОН.md"]
@@ -179,13 +179,8 @@ def make_backup(out_root: str, log) -> str:
 
 def get_whisper(model_size: str, log):
     if model_size not in _whisper_models:
-        try:
-            import setup_deps
-            if not setup_deps.whisper_model_present(model_size):
-                setup_deps.ensure_whisper(model_size, log)
-        except Exception:  # noqa: BLE001
-            pass
-        log(f"Загружаю модель Whisper «{model_size}»...")
+        log(f"Загружаю модель Whisper «{model_size}» "
+            f"(при первом запуске скачивается из интернета, подождите)...")
         from faster_whisper import WhisperModel
         _whisper_models[model_size] = WhisperModel(
             model_size, device="cpu", compute_type="int8"
@@ -1663,15 +1658,6 @@ class App:
         self.jobs_tree.column("status", width=140, anchor="center")
         self.jobs_tree.pack(fill="x", padx=10)
 
-        rowc = ttk.Frame(frm); rowc.pack(fill="x", **pad)
-        self.status_lbl = ttk.Label(
-            rowc, text="Компоненты: проверяю...")
-        self.status_lbl.pack(side="left")
-        self.ollama_btn = ttk.Button(
-            rowc, text="Как включить умный ИИ",
-            command=self._ollama_help)
-        self.ollama_btn.pack(side="right")
-
         ttk.Label(frm, text="Журнал:").pack(anchor="w", **pad)
         self.log_box = scrolledtext.ScrolledText(
             frm, height=14, state="disabled", wrap="word")
@@ -1685,45 +1671,7 @@ class App:
             self.ver_combo.configure(values=list_versions())
         except Exception:  # noqa: BLE001
             pass
-        threading.Thread(target=self._first_run, daemon=True).start()
-
-    def _first_run(self):
-        try:
-            import setup_deps
-            rep = setup_deps.components_report()
-            if not rep["whisper"]:
-                self.log("Готовлю компоненты для первого запуска...")
-                setup_deps.ensure_whisper(self.model_var.get(), self.log)
-            else:
-                self.log("Компоненты на месте, всё готово к работе.")
-        except Exception as e:  # noqa: BLE001
-            self.log(f"Проверка компонентов: {e}")
-        self._refresh_status()
-        self._check_ai()
-
-    def _refresh_status(self):
-        try:
-            import setup_deps
-            r = setup_deps.components_report()
-            wh = "✅" if r["whisper"] else "⏳"
-            ff = "✅" if r["ffmpeg"] else "—"
-            oll = {"ok": "✅", "no_model": "⚠ модель не скачана",
-                   "offline": "— выкл"}.get(r["ollama"], "—")
-            txt = (f"Компоненты:  распознавание речи {wh}   "
-                   f"сжатие видео {ff}   умный ИИ {oll}")
-            self.root.after(0, lambda: self.status_lbl.configure(text=txt))
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _ollama_help(self):
-        messagebox.showinfo(
-            "Умный ИИ (бесплатно, локально)",
-            "Для умных конспектов, тем и перевода установите Ollama:\n\n"
-            "1. Скачайте с https://ollama.com/download и установите\n"
-            "2. В командной строке выполните:  ollama pull qwen2.5:7b\n"
-            "3. Перезапустите архиватор\n\n"
-            "Подробности и выбор модели под ваш компьютер — в ИНСТРУКЦИИ, "
-            "раздел «Умная выжимка». Всё работает офлайн и бесплатно.")
+        threading.Thread(target=self._check_ai, daemon=True).start()
 
     def _check_ai(self):
         try:
@@ -1917,14 +1865,10 @@ class App:
 
 
 def main():
-    if "--web" in sys.argv:
-        import runpy
-        runpy.run_module("archiver_web", run_name="__main__")
-        return
     if not HAS_GUI:
         print("Модуль окон (tkinter) не установлен.")
         print("Linux: выполните  sudo apt install python3-tk")
-        print("Либо запустите веб-версию:  archiver --web")
+        print("Либо используйте веб-версию:  python archiver_web.py")
         sys.exit(1)
     root = tk.Tk()
     try:

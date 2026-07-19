@@ -91,7 +91,7 @@ def now_str() -> str:
 
 _whisper_models = {}
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.1.0"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_FILES = ["archiver.py", "analyzer.py", "archiver_web.py",
              "requirements.txt", "ИНСТРУКЦИЯ.md", "ИНСТРУКЦИЯ_ТЕЛЕФОН.md"]
@@ -142,13 +142,6 @@ def switch_version(version: str, log):
 def make_backup(out_root: str, log) -> str:
     """Полный бэкап: данные архива + файлы программы + все версии."""
     import zipfile
-
-    def _safe_arc(base, full):
-        rel = os.path.relpath(full, base).replace("\\", "/")
-        if rel.startswith("../") or "/../" in rel or rel == "..":
-            raise ValueError("небезопасный путь в архиве")
-        return rel
-
     backups = os.path.join(BASE_DIR, "Бэкапы")
     os.makedirs(backups, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -160,7 +153,7 @@ def make_backup(out_root: str, log) -> str:
                 for fn in files:
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.join(
-                        "Архив", _safe_arc(out_root, fp)))
+                        "Архив", os.path.relpath(fp, out_root)))
         for f in APP_FILES:
             fp = os.path.join(BASE_DIR, f)
             if os.path.isfile(fp):
@@ -179,13 +172,8 @@ def make_backup(out_root: str, log) -> str:
 
 def get_whisper(model_size: str, log):
     if model_size not in _whisper_models:
-        try:
-            import setup_deps
-            if not setup_deps.whisper_model_present(model_size):
-                setup_deps.ensure_whisper(model_size, log)
-        except Exception:  # noqa: BLE001
-            pass
-        log(f"Загружаю модель Whisper «{model_size}»...")
+        log(f"Загружаю модель Whisper «{model_size}» "
+            f"(при первом запуске скачивается из интернета, подождите)...")
         from faster_whisper import WhisperModel
         _whisper_models[model_size] = WhisperModel(
             model_size, device="cpu", compute_type="int8"
@@ -689,25 +677,13 @@ def clean_transcript(text: str) -> str:
 
 
 def download_file(file_url: str, path: str):
-    """Скачивает файл по прямой ссылке (с защитой от SSRF и без
-    бесконтрольного размера)."""
+    """Скачивает файл по прямой ссылке."""
     import requests
-    if _link_is_unsafe(file_url):
-        raise RuntimeError("Небезопасный адрес для скачивания (локальная сеть)")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    r = requests.get(file_url, headers=headers, timeout=60, stream=True)
+    r = requests.get(file_url, headers=headers, timeout=60)
     r.raise_for_status()
-    limit = 2 * 1024 * 1024 * 1024  # 2 ГБ потолок
-    written = 0
     with open(path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=65536):
-            written += len(chunk)
-            if written > limit:
-                f.close()
-                os.remove(path)
-                raise RuntimeError("Файл превышает лимит 2 ГБ, скачивание прервано")
-            f.write(chunk)
-    return
+        f.write(r.content)
 
 
 # ----------------------------------------------------------------------
@@ -761,7 +737,6 @@ def process_video(url: str, out_root: str, log, model_size: str,
         ydl_opts = {
             "format": fmt,
             "outtmpl": os.path.join(tmpdir, "media.%(ext)s"),
-            "max_filesize": 3 * 1024 * 1024 * 1024,  # потолок 3 ГБ
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -1663,15 +1638,6 @@ class App:
         self.jobs_tree.column("status", width=140, anchor="center")
         self.jobs_tree.pack(fill="x", padx=10)
 
-        rowc = ttk.Frame(frm); rowc.pack(fill="x", **pad)
-        self.status_lbl = ttk.Label(
-            rowc, text="Компоненты: проверяю...")
-        self.status_lbl.pack(side="left")
-        self.ollama_btn = ttk.Button(
-            rowc, text="Как включить умный ИИ",
-            command=self._ollama_help)
-        self.ollama_btn.pack(side="right")
-
         ttk.Label(frm, text="Журнал:").pack(anchor="w", **pad)
         self.log_box = scrolledtext.ScrolledText(
             frm, height=14, state="disabled", wrap="word")
@@ -1685,45 +1651,7 @@ class App:
             self.ver_combo.configure(values=list_versions())
         except Exception:  # noqa: BLE001
             pass
-        threading.Thread(target=self._first_run, daemon=True).start()
-
-    def _first_run(self):
-        try:
-            import setup_deps
-            rep = setup_deps.components_report()
-            if not rep["whisper"]:
-                self.log("Готовлю компоненты для первого запуска...")
-                setup_deps.ensure_whisper(self.model_var.get(), self.log)
-            else:
-                self.log("Компоненты на месте, всё готово к работе.")
-        except Exception as e:  # noqa: BLE001
-            self.log(f"Проверка компонентов: {e}")
-        self._refresh_status()
-        self._check_ai()
-
-    def _refresh_status(self):
-        try:
-            import setup_deps
-            r = setup_deps.components_report()
-            wh = "✅" if r["whisper"] else "⏳"
-            ff = "✅" if r["ffmpeg"] else "—"
-            oll = {"ok": "✅", "no_model": "⚠ модель не скачана",
-                   "offline": "— выкл"}.get(r["ollama"], "—")
-            txt = (f"Компоненты:  распознавание речи {wh}   "
-                   f"сжатие видео {ff}   умный ИИ {oll}")
-            self.root.after(0, lambda: self.status_lbl.configure(text=txt))
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _ollama_help(self):
-        messagebox.showinfo(
-            "Умный ИИ (бесплатно, локально)",
-            "Для умных конспектов, тем и перевода установите Ollama:\n\n"
-            "1. Скачайте с https://ollama.com/download и установите\n"
-            "2. В командной строке выполните:  ollama pull qwen2.5:7b\n"
-            "3. Перезапустите архиватор\n\n"
-            "Подробности и выбор модели под ваш компьютер — в ИНСТРУКЦИИ, "
-            "раздел «Умная выжимка». Всё работает офлайн и бесплатно.")
+        threading.Thread(target=self._check_ai, daemon=True).start()
 
     def _check_ai(self):
         try:
@@ -1917,14 +1845,10 @@ class App:
 
 
 def main():
-    if "--web" in sys.argv:
-        import runpy
-        runpy.run_module("archiver_web", run_name="__main__")
-        return
     if not HAS_GUI:
         print("Модуль окон (tkinter) не установлен.")
         print("Linux: выполните  sudo apt install python3-tk")
-        print("Либо запустите веб-версию:  archiver --web")
+        print("Либо используйте веб-версию:  python archiver_web.py")
         sys.exit(1)
     root = tk.Tk()
     try:

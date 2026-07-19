@@ -91,7 +91,7 @@ def now_str() -> str:
 
 _whisper_models = {}
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.0.0.9"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_FILES = ["archiver.py", "analyzer.py", "archiver_web.py",
              "requirements.txt", "ИНСТРУКЦИЯ.md", "ИНСТРУКЦИЯ_ТЕЛЕФОН.md"]
@@ -142,13 +142,6 @@ def switch_version(version: str, log):
 def make_backup(out_root: str, log) -> str:
     """Полный бэкап: данные архива + файлы программы + все версии."""
     import zipfile
-
-    def _safe_arc(base, full):
-        rel = os.path.relpath(full, base).replace("\\", "/")
-        if rel.startswith("../") or "/../" in rel or rel == "..":
-            raise ValueError("небезопасный путь в архиве")
-        return rel
-
     backups = os.path.join(BASE_DIR, "Бэкапы")
     os.makedirs(backups, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
@@ -160,7 +153,7 @@ def make_backup(out_root: str, log) -> str:
                 for fn in files:
                     fp = os.path.join(root, fn)
                     z.write(fp, os.path.join(
-                        "Архив", _safe_arc(out_root, fp)))
+                        "Архив", os.path.relpath(fp, out_root)))
         for f in APP_FILES:
             fp = os.path.join(BASE_DIR, f)
             if os.path.isfile(fp):
@@ -179,13 +172,8 @@ def make_backup(out_root: str, log) -> str:
 
 def get_whisper(model_size: str, log):
     if model_size not in _whisper_models:
-        try:
-            import setup_deps
-            if not setup_deps.whisper_model_present(model_size):
-                setup_deps.ensure_whisper(model_size, log)
-        except Exception:  # noqa: BLE001
-            pass
-        log(f"Загружаю модель Whisper «{model_size}»...")
+        log(f"Загружаю модель Whisper «{model_size}» "
+            f"(при первом запуске скачивается из интернета, подождите)...")
         from faster_whisper import WhisperModel
         _whisper_models[model_size] = WhisperModel(
             model_size, device="cpu", compute_type="int8"
@@ -689,25 +677,13 @@ def clean_transcript(text: str) -> str:
 
 
 def download_file(file_url: str, path: str):
-    """Скачивает файл по прямой ссылке (с защитой от SSRF и без
-    бесконтрольного размера)."""
+    """Скачивает файл по прямой ссылке."""
     import requests
-    if _link_is_unsafe(file_url):
-        raise RuntimeError("Небезопасный адрес для скачивания (локальная сеть)")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    r = requests.get(file_url, headers=headers, timeout=60, stream=True)
+    r = requests.get(file_url, headers=headers, timeout=60)
     r.raise_for_status()
-    limit = 2 * 1024 * 1024 * 1024  # 2 ГБ потолок
-    written = 0
     with open(path, "wb") as f:
-        for chunk in r.iter_content(chunk_size=65536):
-            written += len(chunk)
-            if written > limit:
-                f.close()
-                os.remove(path)
-                raise RuntimeError("Файл превышает лимит 2 ГБ, скачивание прервано")
-            f.write(chunk)
-    return
+        f.write(r.content)
 
 
 # ----------------------------------------------------------------------
@@ -761,7 +737,6 @@ def process_video(url: str, out_root: str, log, model_size: str,
         ydl_opts = {
             "format": fmt,
             "outtmpl": os.path.join(tmpdir, "media.%(ext)s"),
-            "max_filesize": 3 * 1024 * 1024 * 1024,  # потолок 3 ГБ
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
@@ -1327,169 +1302,6 @@ def process_article(url: str, out_root: str, log,
 # Определение типа ссылки и общая обработка
 # ----------------------------------------------------------------------
 
-# ----------------------------------------------------------------------
-# TWITTER / X (посты, фото, видео)
-# ----------------------------------------------------------------------
-
-def fetch_tweet(tweet_id: str, log) -> dict:
-    """Данные твита через публичные зеркала (без ключей и входа).
-    Возвращает {text, author, username, date, photos[], videos[]}."""
-    import requests
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
-    # основной способ: fxtwitter
-    try:
-        r = requests.get(f"https://api.fxtwitter.com/status/{tweet_id}",
-                         headers=headers, timeout=20)
-        r.raise_for_status()
-        t = (r.json() or {}).get("tweet") or {}
-        if t.get("text") or t.get("media"):
-            media = t.get("media") or {}
-            return {
-                "text": t.get("text") or "",
-                "author": (t.get("author") or {}).get("name") or "",
-                "username": (t.get("author") or {}).get("screen_name") or "",
-                "date": t.get("created_at") or "",
-                "photos": [p.get("url") for p in (media.get("photos") or [])
-                           if p.get("url")],
-                "videos": [v.get("url") for v in (media.get("videos") or [])
-                           if v.get("url")],
-            }
-    except Exception as e:  # noqa: BLE001
-        log(f"Основное зеркало не ответило ({e}), пробую запасное...")
-
-    # запасной способ: vxtwitter
-    r = requests.get(f"https://api.vxtwitter.com/i/status/{tweet_id}",
-                     headers=headers, timeout=20)
-    r.raise_for_status()
-    d = r.json() or {}
-    photos, videos = [], []
-    for m in d.get("media_extended") or []:
-        if m.get("type") == "image" and m.get("url"):
-            photos.append(m["url"])
-        elif m.get("type") in ("video", "gif") and m.get("url"):
-            videos.append(m["url"])
-    return {
-        "text": d.get("text") or "",
-        "author": d.get("user_name") or "",
-        "username": d.get("user_screen_name") or "",
-        "date": d.get("date") or "",
-        "photos": photos,
-        "videos": videos,
-    }
-
-
-def process_twitter(url: str, out_root: str, log, model_size: str,
-                    save_video: bool = True, target_lang: str = "") -> str:
-    m = re.search(r"(?:x|twitter|vxtwitter|fxtwitter)\.com/"
-                  r"[^/]+/status(?:es)?/(\d+)", url)
-    if not m:
-        raise RuntimeError(
-            "Нужна ссылка на конкретный пост, например "
-            "https://x.com/пользователь/status/1234567890")
-    tweet_id = m.group(1)
-
-    log(f"Загружаю пост X/Twitter {tweet_id}...")
-    tw = fetch_tweet(tweet_id, log)
-    text = tw["text"].strip()
-    author = tw["author"] or tw["username"] or "Неизвестный автор"
-
-    first_line = (text.splitlines() or [""])[0].strip()
-    title = sanitize(first_line, 80) if first_line else f"Пост {tweet_id}"
-
-    analysis = try_analyze("пост", first_line or f"Пост {tweet_id}",
-                           f"{author} (@{tw['username']})", "", text, log)
-    if analysis:
-        topic = sanitize(analysis.get("topic") or "Разное")
-        sub = sanitize(analysis.get("subtopic") or "") \
-            if (analysis.get("subtopic") or "").strip() else ""
-        folder = os.path.join(out_root, topic, sub) if sub \
-            else os.path.join(out_root, topic)
-        if analysis.get("title"):
-            title = sanitize(analysis["title"], 80)
-    else:
-        import analyzer
-        folder = os.path.join(out_root,
-                              sanitize(analyzer.detect_topic_keywords(text)))
-    os.makedirs(folder, exist_ok=True)
-    md_path = unique_path(os.path.join(folder, f"{title}.md"))
-    base_name = os.path.splitext(os.path.basename(md_path))[0]
-
-    # фото — рядом с заметкой
-    photo_md = []
-    for i, purl in enumerate(tw["photos"], 1):
-        try:
-            log(f"Скачиваю фото {i}...")
-            img_name = f"{base_name}_фото_{i}.jpg"
-            download_file(purl, os.path.join(folder, img_name))
-            photo_md.append(f"![Фото {i}]({img_name})")
-        except Exception as e:  # noqa: BLE001
-            log(f"Не удалось скачать фото {i}: {e}")
-
-    # видео — расшифровка (и сжатая копия, если включено)
-    transcripts, saved_videos = [], []
-    tmpdir = tempfile.mkdtemp(prefix="archiver_tw_")
-    try:
-        for vi, vurl in enumerate(tw["videos"], 1):
-            try:
-                log(f"Скачиваю видео {vi}...")
-                vpath = os.path.join(tmpdir, f"video_{vi}.mp4")
-                download_file(vurl, vpath)
-                log(f"Расшифровываю речь из видео {vi} (Whisper)...")
-                transcripts.append((vi, transcribe_file(vpath, model_size,
-                                                        log)))
-                if save_video:
-                    saved_videos.append(compress_and_keep_video(
-                        vpath, folder, f"{base_name}_{vi}", log))
-            except Exception as e:  # noqa: BLE001
-                log(f"Видео {vi} не обработалось: {e}")
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    all_transcript = "\n\n".join(t for _, t in transcripts)
-    links = extract_links(text, all_transcript)
-    if links:
-        log("Прохожу по ссылкам из поста, достаю полезное...")
-        link_lines = enrich_links(links, text + "\n" + all_transcript, log)
-    else:
-        link_lines = []
-
-    md = [f"# {first_line or 'Пост ' + tweet_id}", ""]
-    md.append(f"**Источник:** https://x.com/i/status/{tweet_id}  ")
-    md.append(f"**Автор:** {author}"
-              + (f" (@{tw['username']})" if tw["username"] else "") + "  ")
-    if tw["date"]:
-        md.append(f"**Дата публикации:** {tw['date']}  ")
-    if analysis:
-        theme = analysis.get("topic", "")
-        if analysis.get("subtopic"):
-            theme += f" / {analysis['subtopic']}"
-        md.append(f"**Тема:** {theme}  ")
-    md.append(f"**Сохранено:** {now_str()}")
-    md.append("")
-    if photo_md:
-        md += ["## Фото", ""] + photo_md + [""]
-    if text:
-        md += ["## Текст поста", "",
-               maybe_translate(text, target_lang, log), ""]
-    if transcripts:
-        md += ["## Текст видео (расшифровка)", ""]
-        for vi, t in transcripts:
-            if len(transcripts) > 1:
-                md.append(f"### Видео {vi}")
-                md.append("")
-            md.append(maybe_translate(t.strip(), target_lang, log)
-                      or "_Речь не обнаружена._")
-            md.append("")
-    md.append(links_block(link_lines))
-    for name, desc in saved_videos:
-        md.append(video_file_section(name, desc))
-
-    with open(md_path, "w", encoding="utf-8") as f:
-        f.write("\n".join(md))
-    return md_path
-
-
 def host_is(host: str, *domains) -> bool:
     """Точная проверка домена: host равен domain или оканчивается на
     ".domain". Подстрочные проверки ("x.com" in host) уязвимы к адресам
@@ -1508,11 +1320,6 @@ def process_url(url: str, out_root: str, log, model_size: str,
 
     if host_is(host, "t.me", "telegram.me"):
         return process_telegram(url, out_root, log, target_lang)
-
-    if host_is(host, "x.com", "twitter.com", "vxtwitter.com",
-               "fxtwitter.com", "fixupx.com"):
-        return process_twitter(url, out_root, log, model_size,
-                               save_video, target_lang)
 
     if host_is(host, "instagram.com"):
         return process_instagram(url, out_root, log, model_size,
@@ -1663,15 +1470,6 @@ class App:
         self.jobs_tree.column("status", width=140, anchor="center")
         self.jobs_tree.pack(fill="x", padx=10)
 
-        rowc = ttk.Frame(frm); rowc.pack(fill="x", **pad)
-        self.status_lbl = ttk.Label(
-            rowc, text="Компоненты: проверяю...")
-        self.status_lbl.pack(side="left")
-        self.ollama_btn = ttk.Button(
-            rowc, text="Как включить умный ИИ",
-            command=self._ollama_help)
-        self.ollama_btn.pack(side="right")
-
         ttk.Label(frm, text="Журнал:").pack(anchor="w", **pad)
         self.log_box = scrolledtext.ScrolledText(
             frm, height=14, state="disabled", wrap="word")
@@ -1685,45 +1483,7 @@ class App:
             self.ver_combo.configure(values=list_versions())
         except Exception:  # noqa: BLE001
             pass
-        threading.Thread(target=self._first_run, daemon=True).start()
-
-    def _first_run(self):
-        try:
-            import setup_deps
-            rep = setup_deps.components_report()
-            if not rep["whisper"]:
-                self.log("Готовлю компоненты для первого запуска...")
-                setup_deps.ensure_whisper(self.model_var.get(), self.log)
-            else:
-                self.log("Компоненты на месте, всё готово к работе.")
-        except Exception as e:  # noqa: BLE001
-            self.log(f"Проверка компонентов: {e}")
-        self._refresh_status()
-        self._check_ai()
-
-    def _refresh_status(self):
-        try:
-            import setup_deps
-            r = setup_deps.components_report()
-            wh = "✅" if r["whisper"] else "⏳"
-            ff = "✅" if r["ffmpeg"] else "—"
-            oll = {"ok": "✅", "no_model": "⚠ модель не скачана",
-                   "offline": "— выкл"}.get(r["ollama"], "—")
-            txt = (f"Компоненты:  распознавание речи {wh}   "
-                   f"сжатие видео {ff}   умный ИИ {oll}")
-            self.root.after(0, lambda: self.status_lbl.configure(text=txt))
-        except Exception:  # noqa: BLE001
-            pass
-
-    def _ollama_help(self):
-        messagebox.showinfo(
-            "Умный ИИ (бесплатно, локально)",
-            "Для умных конспектов, тем и перевода установите Ollama:\n\n"
-            "1. Скачайте с https://ollama.com/download и установите\n"
-            "2. В командной строке выполните:  ollama pull qwen2.5:7b\n"
-            "3. Перезапустите архиватор\n\n"
-            "Подробности и выбор модели под ваш компьютер — в ИНСТРУКЦИИ, "
-            "раздел «Умная выжимка». Всё работает офлайн и бесплатно.")
+        threading.Thread(target=self._check_ai, daemon=True).start()
 
     def _check_ai(self):
         try:
@@ -1917,14 +1677,10 @@ class App:
 
 
 def main():
-    if "--web" in sys.argv:
-        import runpy
-        runpy.run_module("archiver_web", run_name="__main__")
-        return
     if not HAS_GUI:
         print("Модуль окон (tkinter) не установлен.")
         print("Linux: выполните  sudo apt install python3-tk")
-        print("Либо запустите веб-версию:  archiver --web")
+        print("Либо используйте веб-версию:  python archiver_web.py")
         sys.exit(1)
     root = tk.Tk()
     try:
