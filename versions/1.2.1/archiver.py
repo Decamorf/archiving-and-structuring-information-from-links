@@ -91,7 +91,7 @@ def now_str() -> str:
 
 _whisper_models = {}
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.2.1"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_FILES = ["archiver.py", "analyzer.py", "archiver_web.py",
              "requirements.txt", "ИНСТРУКЦИЯ.md", "ИНСТРУКЦИЯ_ТЕЛЕФОН.md"]
@@ -346,44 +346,40 @@ _LOCAL_HOST_RE = re.compile(
     re.IGNORECASE)
 
 
-def _unsafe_reason(link: str) -> str:
-    """Возвращает причину блокировки ('' если адрес безопасен).
-    Публичные адреса разрешаются даже при проблемах DNS/VPN."""
+def _link_is_unsafe(link: str) -> bool:
+    """True, если ссылка ведёт во внутреннюю сеть (защита от SSRF: чтобы
+    ссылка из чужого поста не заставила программу стучаться в ваш роутер,
+    Ollama или Tailscale-сеть). Публичные адреса — разрешены, даже если
+    из-за VPN/DNS их не удаётся разрешить в конкретный IP."""
     try:
         import ipaddress
         import socket as _s
         import urllib.parse as _up
         host = (_up.urlparse(link).hostname or "").strip("[]")
         if not host:
-            return "пустой адрес"
+            return True
+        # 1) явные локальные имена и адреса — блок сразу, без сети
         if _LOCAL_HOST_RE.match(host):
-            return f"локальное имя/адрес: {host}"
+            return True
+        # 2) если host уже IP — проверяем напрямую
         try:
             ip = ipaddress.ip_address(host)
-            return "" if ip.is_global else f"частный IP: {host}"
+            return not ip.is_global
         except ValueError:
             pass
-        # доверенные CDN — пропускаем без резолва (обходит капризы VPN)
-        if host.lower().endswith((
-                "twimg.com", "cdninstagram.com", "fbcdn.net",
-                "twitter.com", "x.com", "redd.it", "imgur.com",
-                "ytimg.com", "googlevideo.com")):
-            return ""
+        # 3) публичное доменное имя: пробуем разрешить, но ошибку/таймаут
+        #    НЕ считаем «локальным» (иначе VPN/DNS ложно блокируют CDN)
         try:
             _s.setdefaulttimeout(4)
             for info in _s.getaddrinfo(host, None):
                 ip = ipaddress.ip_address(info[4][0])
                 if not ip.is_global:
-                    return f"домен {host} ведёт на частный IP {info[4][0]}"
+                    return True
         except Exception:  # noqa: BLE001
-            return ""  # не смогли резолвить — считаем внешним
-        return ""
-    except Exception as e:  # noqa: BLE001
-        return f"ошибка проверки: {e}"
-
-
-def _link_is_unsafe(link: str) -> bool:
-    return bool(_unsafe_reason(link))
+            return False  # не смогли резолвить — считаем внешним
+        return False
+    except Exception:  # noqa: BLE001
+        return True  # не смогли проверить — не ходим
 
 
 def fetch_page_text(link: str):
@@ -724,9 +720,8 @@ def download_file(file_url: str, path: str):
     """Скачивает файл по прямой ссылке (с защитой от SSRF и без
     бесконтрольного размера)."""
     import requests
-    _reason = _unsafe_reason(file_url)
-    if _reason:
-        raise RuntimeError(f"Небезопасный адрес для скачивания ({_reason})")
+    if _link_is_unsafe(file_url):
+        raise RuntimeError("Небезопасный адрес для скачивания (локальная сеть)")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     r = requests.get(file_url, headers=headers, timeout=60, stream=True)
     r.raise_for_status()
@@ -1604,17 +1599,6 @@ class App:
         self.queue = queue.Queue()
         self.jobs = []
         self.job_q = queue.Queue()
-        # файл журнала этой сессии (имя латиницей — переносимо)
-        try:
-            logs_dir = os.path.join(BASE_DIR, "logs")
-            os.makedirs(logs_dir, exist_ok=True)
-            stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            self.log_path = os.path.join(logs_dir, f"log_{stamp}.txt")
-            self.log_file = open(self.log_path, "a", encoding="utf-8")
-            self.log_file.write(f"Архиватор v{APP_VERSION} — журнал сессии\n")
-            self.log_file.flush()
-        except Exception:  # noqa: BLE001
-            self.log_file = None
 
         default_out = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "Архив")
@@ -1727,12 +1711,7 @@ class App:
             command=self._ollama_help)
         self.ollama_btn.pack(side="right")
 
-        rowlog = ttk.Frame(frm); rowlog.pack(fill="x", **pad)
-        ttk.Label(rowlog, text="Журнал:").pack(side="left")
-        ttk.Button(rowlog, text="Копировать журнал",
-                   command=self.copy_log).pack(side="right")
-        ttk.Label(rowlog, text="(пишется и в файл в папке logs)",
-                  foreground="#888").pack(side="right", padx=8)
+        ttk.Label(frm, text="Журнал:").pack(anchor="w", **pad)
         self.log_box = scrolledtext.ScrolledText(
             frm, height=14, state="disabled", wrap="word")
         self.log_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
@@ -1832,16 +1811,6 @@ class App:
         except Exception as e:  # noqa: BLE001
             self.log(f"Не удалось переключить версию: {e}")
 
-    def copy_log(self):
-        try:
-            text = self.log_box.get("1.0", "end").strip()
-            self.root.clipboard_clear()
-            self.root.clipboard_append(text)
-            self.log(f"Журнал скопирован в буфер ({len(text.splitlines())} "
-                     f"строк). Файл: {getattr(self, 'log_path', '—')}")
-        except Exception as e:  # noqa: BLE001
-            self.log(f"Не удалось скопировать: {e}")
-
     def paste_url(self):
         """Кнопка «Вставить»: берёт ссылку из буфера обмена."""
         try:
@@ -1907,12 +1876,6 @@ class App:
                 self.log_box.configure(state="normal")
                 stamp = datetime.datetime.now().strftime("%H:%M:%S")
                 self.log_box.insert("end", f"[{stamp}] {msg}\n")
-                if self.log_file:
-                    try:
-                        self.log_file.write(f"[{stamp}] {msg}\n")
-                        self.log_file.flush()
-                    except Exception:  # noqa: BLE001
-                        pass
                 self.log_box.see("end")
                 self.log_box.configure(state="disabled")
         except queue.Empty:

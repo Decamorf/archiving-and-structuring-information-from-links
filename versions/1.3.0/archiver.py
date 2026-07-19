@@ -91,7 +91,7 @@ def now_str() -> str:
 
 _whisper_models = {}
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.0"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 APP_FILES = ["archiver.py", "analyzer.py", "archiver_web.py",
              "requirements.txt", "ИНСТРУКЦИЯ.md", "ИНСТРУКЦИЯ_ТЕЛЕФОН.md"]
@@ -346,44 +346,40 @@ _LOCAL_HOST_RE = re.compile(
     re.IGNORECASE)
 
 
-def _unsafe_reason(link: str) -> str:
-    """Возвращает причину блокировки ('' если адрес безопасен).
-    Публичные адреса разрешаются даже при проблемах DNS/VPN."""
+def _link_is_unsafe(link: str) -> bool:
+    """True, если ссылка ведёт во внутреннюю сеть (защита от SSRF: чтобы
+    ссылка из чужого поста не заставила программу стучаться в ваш роутер,
+    Ollama или Tailscale-сеть). Публичные адреса — разрешены, даже если
+    из-за VPN/DNS их не удаётся разрешить в конкретный IP."""
     try:
         import ipaddress
         import socket as _s
         import urllib.parse as _up
         host = (_up.urlparse(link).hostname or "").strip("[]")
         if not host:
-            return "пустой адрес"
+            return True
+        # 1) явные локальные имена и адреса — блок сразу, без сети
         if _LOCAL_HOST_RE.match(host):
-            return f"локальное имя/адрес: {host}"
+            return True
+        # 2) если host уже IP — проверяем напрямую
         try:
             ip = ipaddress.ip_address(host)
-            return "" if ip.is_global else f"частный IP: {host}"
+            return not ip.is_global
         except ValueError:
             pass
-        # доверенные CDN — пропускаем без резолва (обходит капризы VPN)
-        if host.lower().endswith((
-                "twimg.com", "cdninstagram.com", "fbcdn.net",
-                "twitter.com", "x.com", "redd.it", "imgur.com",
-                "ytimg.com", "googlevideo.com")):
-            return ""
+        # 3) публичное доменное имя: пробуем разрешить, но ошибку/таймаут
+        #    НЕ считаем «локальным» (иначе VPN/DNS ложно блокируют CDN)
         try:
             _s.setdefaulttimeout(4)
             for info in _s.getaddrinfo(host, None):
                 ip = ipaddress.ip_address(info[4][0])
                 if not ip.is_global:
-                    return f"домен {host} ведёт на частный IP {info[4][0]}"
+                    return True
         except Exception:  # noqa: BLE001
-            return ""  # не смогли резолвить — считаем внешним
-        return ""
-    except Exception as e:  # noqa: BLE001
-        return f"ошибка проверки: {e}"
-
-
-def _link_is_unsafe(link: str) -> bool:
-    return bool(_unsafe_reason(link))
+            return False  # не смогли резолвить — считаем внешним
+        return False
+    except Exception:  # noqa: BLE001
+        return True  # не смогли проверить — не ходим
 
 
 def fetch_page_text(link: str):
@@ -724,9 +720,8 @@ def download_file(file_url: str, path: str):
     """Скачивает файл по прямой ссылке (с защитой от SSRF и без
     бесконтрольного размера)."""
     import requests
-    _reason = _unsafe_reason(file_url)
-    if _reason:
-        raise RuntimeError(f"Небезопасный адрес для скачивания ({_reason})")
+    if _link_is_unsafe(file_url):
+        raise RuntimeError("Небезопасный адрес для скачивания (локальная сеть)")
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     r = requests.get(file_url, headers=headers, timeout=60, stream=True)
     r.raise_for_status()
