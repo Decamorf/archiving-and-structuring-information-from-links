@@ -7,3 +7,10 @@ venv/
 web_secret.txt
 logs/
 GITHUB.md
+# продукты сборки — в репозиторий не попадают (для них GitHub Releases)
+build/
+dist/
+Output/
+.buildenv/
+*.AppImage
+appimagetool
