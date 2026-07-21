@@ -11,7 +11,7 @@ a = Analysis(
         'faster_whisper', 'yt_dlp', 'instaloader', 'trafilatura',
         'bs4', 'flask', 'werkzeug', 'PIL', 'imageio_ffmpeg',
         'huggingface_hub', 'requests', 'analyzer', 'setup_deps',
-        'archiver_web',
+        'archiver_web', 'bot',
     ],
     hookspath=[],
     runtime_hooks=[],

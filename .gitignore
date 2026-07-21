@@ -14,3 +14,4 @@ Output/
 .buildenv/
 *.AppImage
 appimagetool
+bot_config.json
