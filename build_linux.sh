@@ -18,7 +18,7 @@ pyinstaller --noconfirm --windowed --name "Архиватор" \
   --hidden-import instaloader --hidden-import trafilatura \
   --hidden-import flask --hidden-import PIL \
   --hidden-import huggingface_hub --hidden-import analyzer \
-  --hidden-import setup_deps --hidden-import archiver_web --hidden-import bot \
+  --hidden-import setup_deps --hidden-import archiver_web --hidden-import bot --hidden-import updater \
   app_launcher.py
 
 echo "[3/4] Упаковка в AppImage..."
