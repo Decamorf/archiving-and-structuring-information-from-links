@@ -2,7 +2,7 @@
 ; Получится Архиватор_setup.exe — обычный установщик с иконкой и удалением.
 [Setup]
 AppName=Архиватор ссылок
-AppVersion=1.7.0
+AppVersion=1.7.1
 DefaultDirName={autopf}\Архиватор ссылок
 DefaultGroupName=Архиватор ссылок
 OutputBaseFilename=Архиватор_setup
