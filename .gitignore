@@ -15,3 +15,5 @@ Output/
 *.AppImage
 appimagetool
 bot_config.json
+index.json
+bot_config.json
